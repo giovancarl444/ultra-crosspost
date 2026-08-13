@@ -35,16 +35,6 @@ profiles:
       enabled: true
       webhook_env: DISCORD_WEBHOOK_BRAND_A
 
-    # Media host, not a posting target. Video goes here first and the resulting
-    # redgifs.com link is what gets posted — Reddit and Discord both render it as an
-    # inline player, which also sidesteps Discord's 10 MiB webhook attachment limit.
-    redgifs:
-      enabled: true
-      username_env: REDGIFS_USERNAME_BRAND_A
-      password_env: REDGIFS_PASSWORD_BRAND_A
-      default_tags: []
-      private: false
-
     # X is not implemented in this build. It has had no free tier since Feb 2026 —
     # posting is $0.015/request, or $0.200/request when the text contains a URL.
     # See README → "X (deferred)". Setting this to true is a config error today.
@@ -73,13 +63,6 @@ profiles:
     discord:
       enabled: true
       webhook_env: DISCORD_WEBHOOK_BRAND_B
-
-    redgifs:
-      enabled: false
-      username_env: REDGIFS_USERNAME_BRAND_B
-      password_env: REDGIFS_PASSWORD_BRAND_B
-      default_tags: []
-      private: false
 
     x:
       enabled: false

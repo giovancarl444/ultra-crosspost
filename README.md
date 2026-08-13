@@ -28,13 +28,30 @@ Drive inbox/ ──▶ queue ──▶ Telegram: ✅ Approve / ❌ Decline / ⏭
 | Phase | Scope | State |
 | --- | --- | --- |
 | 0 | Scaffold, config, README | **done** |
-| 1 | Telegram core — allow-listed chat, approval buttons | next |
-| 2 | Drive queue + SQLite state | |
+| 1 | Telegram core — allow-listed chat, approval buttons | **done** |
+| 2 | Drive queue + SQLite state | next |
 | 3 | Discord publishing | |
-| 4 | Reddit publishing | |
-| 5 | Hardening — RedGifs video path, Retry, restart reconciliation, Docker | |
+| 4 | Reddit publishing — native video, link passthrough | |
+| 5 | Hardening — Retry, restart reconciliation, Docker | |
 
 X is **not** in the roadmap — see [X (deferred)](#x-deferred).
+
+## Running it
+
+```bash
+.venv/bin/python -m app                 # starts the bot
+.venv/bin/python -m app --check-config   # validates without touching the network
+```
+
+In an allow-listed chat the bot answers two commands:
+
+| Command | Effect |
+| --- | --- |
+| `/start` | Confirms which profile the chat is bound to and echoes the chat id. |
+| `/test` | Sends `assets/test.png` as an approval card, to check the buttons work. |
+
+Every update from any other chat is ignored — but its chat id is logged at INFO, which is
+how you onboard a new chat without loosening the allow-list.
 
 ## Quick start
 
@@ -120,17 +137,40 @@ several of these changed recently.
 
 Consequences baked into the design:
 
-- **Video goes to RedGifs first.** Reddit and Discord both render a `redgifs.com` link as
-  an inline player, so a link post is a full-quality post — not a degraded one — and it
-  sidesteps Discord's 10 MiB attachment ceiling entirely. The upload flow is four calls
-  over plain `httpx` (`/v1/oauth/weblogin` → `/v1/gifs/submit` → `PUT` the bytes →
-  poll `/v1/gifs/fetch/status/{id}`), so it needs no extra dependency.
 - **A file over 10 MB can't be previewed as a photo in Telegram**, and one over 50 MB
   can't be uploaded at all; those are sent for approval as filename + Drive link instead.
 - **Media DM'd to the bot is capped at 20 MB** — that is a download limit on Telegram's
   side, so the bot physically cannot fetch a larger file. Those are rejected with a note.
 - **Captions over 1024 characters** can't ride along with the preview media, so the
   preview sends the media first and the full text as a follow-up message.
+
+### Video, and why RedGifs is not integrated
+
+RedGifs would have been the natural video host — Reddit renders a `redgifs.com` link as an
+inline player. It is not integrated because the API is no longer scriptable. Probing the
+live service rather than trusting its published spec:
+
+| Endpoint in the published 1.0.0 spec | Live response |
+| --- | --- |
+| `POST /v1/oauth/weblogin` | `404 HttpNotFoundException` — gone |
+| `POST /v2/auth/login` | `400` — *"missing field `captcha`"* |
+| `POST /v2/oauth/token` | `401 UnsupportedGrant` — *"must be: authorization_code, or refresh_token"*, and needs a registered `client_id` |
+| `GET /v2/auth/temporary` | works, but the token carries `scopes: read` |
+
+Password login is captcha-gated and token exchange needs an OAuth client that RedGifs no
+longer issues on request. Automating around that would mean driving a browser session on a
+brand account — fragile, and against their terms.
+
+What the engine does instead:
+
+- **Reddit takes video natively.** `Subreddit.submit(video=...)` produces a `v.redd.it`
+  post with Reddit's own inline player — the same result a RedGifs embed gives.
+- **A URL in the caption becomes a link post.** If the caption body contains a URL, Reddit
+  posts *that link* with the remaining text as the Markdown body. So the manual RedGifs
+  workflow still works end to end: upload by hand, paste the link into the caption, and
+  the bot publishes it as a properly embedded link post.
+- **Discord** attaches the file under the 10 MiB webhook ceiling and otherwise posts the
+  caption plus whichever URL the item carries, reported as `DEGRADED` rather than a clean ✅.
 
 ### X (deferred)
 
@@ -174,19 +214,23 @@ Pinned in `requirements.txt` to the versions current on 2026-08-13.
   rather inject environment variables purely through Docker Compose.
 - `google-api-python-client` is synchronous; Drive calls are made via `asyncio.to_thread`
   so they never block the event loop.
-- No `tweepy` (X is deferred) and no `redgifs` package — the PyPI one is read-only and has
-  no upload support, so RedGifs is called directly over `httpx`.
+- No `tweepy` (X is deferred) and no `redgifs` (not integrated — see above).
 
 ## Layout
 
 ```
 app/
   __main__.py        entrypoint, --check-config
+  service.py         composition root: one event loop, ordered shutdown
   config.py          .env + profiles.yaml loading and validation
   models.py          Item, ItemStatus, the caption convention
   logging_setup.py   logging + secret redaction
+  telegram/
+    bot.py           Application construction and the chat allow-list
+    handlers.py      commands, approval keyboard, size-aware send helper
   platforms/
     base.py          the publisher interface: item + caption in, result out
+assets/test.png      approval card used by /test
 ```
 
 `platforms/` is deliberately free of any Telegram or Drive concept, so a future web UI

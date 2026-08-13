@@ -24,17 +24,13 @@ def _section(enabled: bool, detail: str) -> str:
 
 
 def _describe_profile(profile: Profile) -> list[str]:
-    reddit, discord, redgifs = profile.reddit, profile.discord, profile.redgifs
+    reddit, discord = profile.reddit, profile.discord
 
     reddit_detail = (
         f"r/{reddit.subreddit}  nsfw={'yes' if reddit.nsfw else 'no'}  "
         f"flair={reddit.flair_text or reddit.flair_id or 'none'}"
     )
     discord_detail = f"webhook from {discord.webhook.env_var}" if discord.webhook else "?"
-    redgifs_detail = (
-        f"video host  tags={', '.join(redgifs.default_tags) or 'none'}  "
-        f"private={'yes' if redgifs.private else 'no'}"
-    )
 
     rows = [
         ("telegram chat", str(profile.telegram_chat_id)),
@@ -43,7 +39,6 @@ def _describe_profile(profile: Profile) -> list[str]:
         ("drive rejected", profile.drive.rejected_folder_id),
         ("reddit", _section(reddit.enabled, reddit_detail)),
         ("discord", _section(discord.enabled, discord_detail)),
-        ("redgifs", _section(redgifs.enabled, redgifs_detail)),
         ("x", _section(profile.x.enabled, "") if profile.x.enabled else "disabled  deferred, see README"),
     ]
     return [f"  {label:<15}{value}" for label, value in rows]

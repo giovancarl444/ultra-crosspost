@@ -36,8 +36,9 @@ class MediaRef:
     mime: str
     size_bytes: int
     hosted_url: str | None = None
-    """Set once the media has been uploaded to a host (RedGifs). Adapters that cannot
-    take the file natively post this link instead and return DEGRADED."""
+    """A link to this media somewhere it can already be watched — a URL the operator put
+    in the caption, or the permalink of a platform that accepted the upload. Adapters that
+    cannot take the file natively post this link instead and return DEGRADED."""
 
     @property
     def is_video(self) -> bool:
@@ -76,7 +77,7 @@ class PostResult:
     url: str | None = None
     detail: str | None = None
     """Human-readable context: the error for FAILED, or what was traded away for DEGRADED
-    (e.g. "video over the 10 MiB webhook limit — posted the RedGifs link instead")."""
+    (e.g. "video over the 10 MiB webhook limit — posted the link instead")."""
 
     @classmethod
     def ok(cls, platform: str, url: str) -> PostResult:

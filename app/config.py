@@ -20,7 +20,7 @@ DEFAULT_PROFILES_FILE = Path("profiles.yaml")
 DEFAULT_POLL_INTERVAL_SECONDS = 120
 
 PLATFORMS = ("reddit", "discord", "x")
-"""Platforms that publish a post. RedGifs is a media host, not a publisher."""
+"""Platforms that publish a post."""
 
 
 class ConfigError(Exception):
@@ -86,20 +86,6 @@ class DiscordConfig:
 
 
 @dataclass(frozen=True)
-class RedGifsConfig:
-    """Media host used for video, which Reddit and Discord both render as an inline player."""
-
-    enabled: bool
-    username: SecretRef | None
-    password: SecretRef | None
-    default_tags: tuple[str, ...] = ()
-    private: bool = False
-
-    def secrets(self) -> list[SecretRef]:
-        return [s for s in (self.username, self.password) if s]
-
-
-@dataclass(frozen=True)
 class XConfig:
     """X is deferred — it has had no free tier since Feb 2026 (see README). The block
     exists so the profile schema is stable when it is switched back on."""
@@ -117,7 +103,6 @@ class Profile:
     drive: DriveFolders
     reddit: RedditConfig
     discord: DiscordConfig
-    redgifs: RedGifsConfig
     x: XConfig
 
     @property
@@ -126,7 +111,7 @@ class Profile:
 
     def secrets(self) -> list[SecretRef]:
         refs: list[SecretRef] = []
-        for section in (self.reddit, self.discord, self.x, self.redgifs):
+        for section in (self.reddit, self.discord, self.x):
             if section.enabled:
                 refs.extend(section.secrets())
         return refs
@@ -292,9 +277,6 @@ def _parse_profile(parser: _Parser, data: Any, index: int) -> Profile | None:
     discord_data = parser.section(data, "discord", path)
     discord_enabled = parser.boolean(discord_data, "enabled", f"{path}.discord", default=False)
 
-    redgifs_data = parser.section(data, "redgifs", path)
-    redgifs_enabled = parser.boolean(redgifs_data, "enabled", f"{path}.redgifs", default=False)
-
     x_enabled = parser.boolean(parser.section(data, "x", path), "enabled", f"{path}.x", default=False)
     if x_enabled:
         parser.fail(
@@ -317,25 +299,6 @@ def _parse_profile(parser: _Parser, data: Any, index: int) -> Profile | None:
                 f"Discord webhook URL for {label}",
                 required=discord_enabled,
             ),
-        ),
-        redgifs=RedGifsConfig(
-            enabled=redgifs_enabled,
-            username=parser.secret(
-                redgifs_data,
-                "username_env",
-                f"{path}.redgifs",
-                f"RedGifs account for {label}",
-                required=redgifs_enabled,
-            ),
-            password=parser.secret(
-                redgifs_data,
-                "password_env",
-                f"{path}.redgifs",
-                f"RedGifs password for {label}",
-                required=redgifs_enabled,
-            ),
-            default_tags=parser.string_list(redgifs_data, "default_tags", f"{path}.redgifs"),
-            private=parser.boolean(redgifs_data, "private", f"{path}.redgifs", default=False),
         ),
         x=XConfig(enabled=x_enabled),
     )
