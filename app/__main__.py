@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import sys
 from pathlib import Path
 
 from app import __version__
 from app.config import ConfigError, Profile, Settings, load_settings
+from app.logging_setup import configure_logging
 
 EXIT_OK = 0
 EXIT_INCOMPLETE = 1
@@ -115,10 +117,25 @@ def main(argv: list[str] | None = None) -> int:
     if args.check_config:
         return check_config(settings)
 
-    print(
-        "Phase 0 is scaffold only — there is no service to run yet.\n"
-        "Use `python -m app --check-config` to verify the configuration."
-    )
+    if not settings.telegram_bot_token.is_set:
+        print(
+            f"{BAD} TELEGRAM_BOT_TOKEN is not set — the bot cannot start.\n"
+            "Run `python -m app --check-config` to see everything that is missing.",
+            file=sys.stderr,
+        )
+        return EXIT_INCOMPLETE
+
+    # Hand the resolved values to the logger so no library can leak one into a log line.
+    known_secrets = [
+        value
+        for ref in [settings.telegram_bot_token, *(r for p in settings.profiles for r in p.secrets())]
+        if (value := ref.resolve_optional())
+    ]
+    configure_logging(settings.log_level, known_secrets)
+
+    from app.service import run  # imported late so --check-config never needs the bot deps
+
+    asyncio.run(run(settings))
     return EXIT_OK
 
 
