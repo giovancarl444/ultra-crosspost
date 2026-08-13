@@ -1,219 +1,205 @@
-"""Telegram handlers: the approval keyboard, the taps, and the size-aware send helper.
-
-Everything here is deliberately thin — it turns Telegram events into decisions and back
-into messages. The queue and the platform adapters know nothing about this module.
-"""
+"""Telegram handlers: commands, approval taps, and media sent straight to the bot."""
 
 from __future__ import annotations
 
 import logging
-from enum import StrEnum
 from pathlib import Path
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Message, Update
-from telegram.constants import FileSizeLimit, MessageLimit
-from telegram.error import BadRequest
+from telegram import Update
+from telegram.constants import FileSizeLimit
 from telegram.ext import ContextTypes
 
+from app import db
 from app.config import Profile
+from app.intake import (
+    Runtime,
+    archive,
+    enqueue_telegram_media,
+    local_path_for,
+    offer,
+)
+from app.models import ItemStatus
+from app.telegram.cards import CALLBACK_SEPARATOR, Action, close_card, format_size
 
 log = logging.getLogger(__name__)
 
-CALLBACK_SEPARATOR = ":"
-PROFILES_BY_CHAT = "profiles_by_chat"
+RUNTIME = "runtime"
 TEST_IMAGE = Path("assets/test.png")
 
-
-class Action(StrEnum):
-    APPROVE = "approve"
-    DECLINE = "decline"
-    LATER = "later"
-
-
-ACTION_RESULT = {
-    Action.APPROVE: "✅ Approved\nPhase 2 will ask for the post text here.",
-    Action.DECLINE: "❌ Declined\nThe Drive file moves to rejected/ from Phase 2.",
-    Action.LATER: "⏭ Skipped for now\nIt stays in the queue and comes back around.",
+OUTCOME = {
+    Action.APPROVE: "✅ Approved\nThe caption step arrives in Phase 3.",
+    Action.DECLINE: "❌ Declined",
+    Action.LATER: "⏭ Skipped for now",
 }
 
 
-def approval_keyboard(item_id: int | str) -> InlineKeyboardMarkup:
-    """✅ Approve · ❌ Decline · ⏭ Later. callback_data stays well inside Telegram's 64 bytes."""
-    return InlineKeyboardMarkup(
-        [
-            [
-                InlineKeyboardButton(
-                    label, callback_data=f"{action}{CALLBACK_SEPARATOR}{item_id}"
-                )
-                for action, label in (
-                    (Action.APPROVE, "✅ Approve"),
-                    (Action.DECLINE, "❌ Decline"),
-                    (Action.LATER, "⏭ Later"),
-                )
-            ]
-        ]
-    )
-
-
-def format_size(size_bytes: int) -> str:
-    size = float(size_bytes)
-    for unit in ("B", "KB", "MB", "GB"):
-        if size < 1024 or unit == "GB":
-            return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
-        size /= 1024
-    return f"{size:.1f} GB"
-
-
-def _truncate(caption: str) -> str:
-    limit = MessageLimit.CAPTION_LENGTH
-    return caption if len(caption) <= limit else caption[: limit - 1] + "…"
-
-
-async def send_for_approval(
-    context: ContextTypes.DEFAULT_TYPE,
-    chat_id: int,
-    *,
-    item_id: int | str,
-    path: Path | None,
-    filename: str,
-    mime: str,
-    size_bytes: int,
-    link: str | None = None,
-) -> Message:
-    """Send one item for approval, choosing the delivery that Telegram will actually accept.
-
-    Limits come from PTB's own constants rather than hardcoded numbers: photos cap at 10 MB,
-    any other upload at 50 MB. Past that the bot cannot send the file at all, so the item
-    goes out as filename plus a link instead — the operator can still judge it.
-    """
-    header = f"{filename}\n{format_size(size_bytes)} · {mime}"
-    keyboard = approval_keyboard(item_id)
-
-    too_big_to_upload = size_bytes > FileSizeLimit.FILESIZE_UPLOAD
-    if path is None or not path.is_file() or too_big_to_upload:
-        reason = (
-            f"⚠️ {format_size(size_bytes)} is over Telegram's "
-            f"{format_size(FileSizeLimit.FILESIZE_UPLOAD)} upload limit — preview not attached."
-            if too_big_to_upload
-            else "⚠️ Media not available locally."
-        )
-        body = f"{header}\n\n{reason}"
-        if link:
-            body += f"\n{link}"
-        return await context.bot.send_message(
-            chat_id=chat_id, text=_truncate(body), reply_markup=keyboard
-        )
-
-    with path.open("rb") as handle:
-        send_as_photo = mime.startswith("image/") and size_bytes <= FileSizeLimit.PHOTOSIZE_UPLOAD
-        if send_as_photo:
-            return await context.bot.send_photo(
-                chat_id=chat_id,
-                photo=handle,
-                caption=_truncate(header),
-                reply_markup=keyboard,
-            )
-        # Video, or an image too large to send compressed: send it as a document so
-        # Telegram neither re-encodes nor rejects it.
-        return await context.bot.send_document(
-            chat_id=chat_id,
-            document=handle,
-            filename=filename,
-            caption=_truncate(header),
-            reply_markup=keyboard,
-        )
+def _runtime(context: ContextTypes.DEFAULT_TYPE) -> Runtime:
+    return context.bot_data[RUNTIME]
 
 
 def _profile_for(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> Profile | None:
-    return context.bot_data.get(PROFILES_BY_CHAT, {}).get(chat_id)
+    return next(
+        (p for p in _runtime(context).settings.profiles if p.telegram_chat_id == chat_id), None
+    )
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    chat = update.effective_chat
+    rt, chat = _runtime(context), update.effective_chat
     profile = _profile_for(context, chat.id)
-    if profile is None:  # unreachable via the allow-list filter, but cheap to be sure
+    if profile is None:
         return
-    platforms = ", ".join(profile.enabled_platforms) or "none"
+    counts = await db.counts_by_status(rt.conn, profile.name)
+    queue = ", ".join(f"{n} {status}" for status, n in sorted(counts.items())) or "empty"
+    drive_state = "connected" if rt.drive else "not configured"
+    log.info("chat %s: /start", chat.id)
     await context.bot.send_message(
         chat_id=chat.id,
         text=(
             f"Crosspost Engine is up.\n\n"
             f"profile: {profile.name}\n"
-            f"platforms: {platforms}\n"
-            f"chat id: {chat.id}\n\n"
-            "Send /test to see an approval card."
+            f"platforms: {', '.join(profile.enabled_platforms) or 'none'}\n"
+            f"drive: {drive_state}\n"
+            f"queue: {queue}\n\n"
+            "Send me a photo or video to queue it, or /test for a sample card."
         ),
     )
 
 
 async def test(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Send a local test image with the approval buttons. This is the Phase 1 check."""
-    chat = update.effective_chat
+    """Queue the bundled test image as a real item, so the whole path gets exercised."""
+    rt, chat = _runtime(context), update.effective_chat
+    profile = _profile_for(context, chat.id)
+    if profile is None:
+        return
     if not TEST_IMAGE.is_file():
         await context.bot.send_message(chat_id=chat.id, text=f"Missing {TEST_IMAGE}.")
         return
-    await send_for_approval(
-        context,
-        chat.id,
-        item_id=0,
-        path=TEST_IMAGE,
-        filename=TEST_IMAGE.name,
-        mime="image/png",
+
+    log.info("chat %s: /test", chat.id)
+    item = await enqueue_telegram_media(
+        rt, profile, filename=TEST_IMAGE.name, mime="image/png",
         size_bytes=TEST_IMAGE.stat().st_size,
     )
+    if item is None:
+        await context.bot.send_message(chat_id=chat.id, text="Could not queue the test image.")
+        return
+
+    destination = local_path_for(rt.settings, item)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_bytes(TEST_IMAGE.read_bytes())
+    await db.set_local_path(rt.conn, item.id, destination)
+    item.local_path = str(destination)
+    await offer(rt, profile, item)
+
+
+async def on_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Media sent straight to the bot joins the same queue as a Drive file.
+
+    There is no Drive file behind it, so it is never archive-moved. Telegram caps what a
+    bot may *download* at 20 MB, well below what it may send, so anything larger is
+    refused with an explanation rather than failing opaquely.
+    """
+    rt, chat, message = _runtime(context), update.effective_chat, update.effective_message
+    profile = _profile_for(context, chat.id)
+    if profile is None:
+        return
+
+    if message.photo:
+        media, filename, mime = message.photo[-1], f"photo_{message.message_id}.jpg", "image/jpeg"
+    elif message.video:
+        media = message.video
+        filename = media.file_name or f"video_{message.message_id}.mp4"
+        mime = media.mime_type or "video/mp4"
+    elif message.document:
+        media = message.document
+        filename = media.file_name or f"file_{message.message_id}"
+        mime = media.mime_type or "application/octet-stream"
+        if not mime.startswith(("image/", "video/")):
+            await message.reply_text(f"Ignoring {filename} — only images and video are queued.")
+            return
+    else:
+        return
+
+    size = media.file_size or 0
+    if size > FileSizeLimit.FILESIZE_DOWNLOAD:
+        await message.reply_text(
+            f"{filename} is {format_size(size)}. Telegram only lets a bot download up to "
+            f"{format_size(FileSizeLimit.FILESIZE_DOWNLOAD)}, so I cannot fetch it. "
+            "Put it in the Drive inbox instead."
+        )
+        return
+
+    item = await enqueue_telegram_media(
+        rt, profile, filename=filename, mime=mime, size_bytes=size
+    )
+    if item is None:
+        await message.reply_text("Could not queue that.")
+        return
+
+    destination = local_path_for(rt.settings, item)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    telegram_file = await media.get_file()
+    await telegram_file.download_to_drive(custom_path=destination)
+    await db.set_local_path(rt.conn, item.id, destination)
+    item.local_path = str(destination)
+    item.size_bytes = destination.stat().st_size
+    await offer(rt, profile, item)
 
 
 async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle an approval tap.
 
     Callback queries carry no chat filter of their own, so the allow-list is re-checked
-    here rather than relying on the filter that guards the message handlers.
+    here rather than relying on the filter guarding the message handlers.
     """
-    query = update.callback_query
-    chat = update.effective_chat
-    if chat is None or _profile_for(context, chat.id) is None:
+    rt, query, chat = _runtime(context), update.callback_query, update.effective_chat
+    profile = _profile_for(context, chat.id) if chat else None
+    if profile is None:
         log.info("ignoring callback from non-allow-listed chat %s", chat.id if chat else "?")
         await query.answer()
         return
 
-    action_name, _, item_id = (query.data or "").partition(CALLBACK_SEPARATOR)
+    action_name, _, raw_id = (query.data or "").partition(CALLBACK_SEPARATOR)
     try:
-        action = Action(action_name)
+        action, item_id = Action(action_name), int(raw_id)
     except ValueError:
-        log.warning("unknown callback action %r", action_name)
+        log.warning("unusable callback data %r", query.data)
         await query.answer("Unknown action.")
         return
 
-    await query.answer()
-    log.info("chat %s: %s item %s", chat.id, action.value, item_id or "?")
-    await _replace_keyboard(query.message, ACTION_RESULT[action])
-
-
-async def _replace_keyboard(message: Message | None, outcome: str) -> None:
-    """Fold the outcome into the original message and drop the buttons, so the card can
-    never be tapped twice."""
-    if message is None:
+    item = await db.get_item(rt.conn, item_id)
+    if item is None:
+        await query.answer("That item is gone.")
+        await close_card(query.message, "⚠️ Item no longer in the queue.")
         return
-    original = message.caption or message.text or ""
-    updated = f"{original}\n\n{outcome}".strip()
-    try:
-        if message.caption is not None:
-            await message.edit_caption(caption=updated, reply_markup=None)
-        else:
-            await message.edit_text(text=updated, reply_markup=None)
-    except BadRequest as exc:
-        # "Message is not modified" on a double-tap is expected and harmless.
-        if "not modified" not in str(exc).lower():
-            raise
+    if item.status is not ItemStatus.PENDING_APPROVAL:
+        await query.answer("Already handled.")
+        await close_card(query.message, f"⚠️ Already {item.status}.")
+        return
+
+    await query.answer()
+    log.info("chat %s: %s item %d", chat.id, action.value, item.id)
+
+    outcome = OUTCOME[action]
+    if action is Action.DECLINE:
+        problem = await archive(rt, item, status=ItemStatus.DECLINED)
+        outcome += "\nMoved to rejected/." if problem is None else f"\n⚠️ {problem}"
+    elif action is Action.LATER:
+        await db.defer(rt.conn, item.id, rt.settings.later_cooldown_minutes)
+        outcome += f"\nBack in about {rt.settings.later_cooldown_minutes} min."
+    else:
+        await db.set_status(rt.conn, item.id, ItemStatus.AWAITING_TEXT)
+
+    await close_card(query.message, outcome)
 
 
 async def log_ignored(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Every update from outside the allow-list lands here: no reply, but the chat id is
-    logged so a new chat can be onboarded without loosening the rule."""
+    """Updates from outside the allow-list: no reply, but the chat id is logged so a new
+    chat can be onboarded without loosening the rule."""
     chat = update.effective_chat
     if chat is not None:
         log.info(
-            "ignored update from non-allow-listed chat id=%s type=%s title=%r",
+            "ignored update from non-allow-listed chat id=%s type=%s name=%r",
             chat.id,
             chat.type,
             chat.username or chat.title or chat.first_name,

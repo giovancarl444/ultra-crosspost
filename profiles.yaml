@@ -7,6 +7,11 @@ poll_interval_seconds: 120
 media_dir: media
 database_path: crosspost.db
 
+# ⏭ Later puts an item back in the queue; this is how long before it is offered again.
+later_cooldown_minutes: 60
+# Telegram rate-limits bulk sends to one chat, so a large inbox drop trickles out.
+max_offers_per_cycle: 5
+
 profiles:
   - name: brand_a
     # Your private chat with the bot. The bot ignores every update from anywhere else.

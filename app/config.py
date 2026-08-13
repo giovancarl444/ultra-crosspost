@@ -18,6 +18,8 @@ from dotenv import load_dotenv
 
 DEFAULT_PROFILES_FILE = Path("profiles.yaml")
 DEFAULT_POLL_INTERVAL_SECONDS = 120
+DEFAULT_LATER_COOLDOWN_MINUTES = 60
+DEFAULT_MAX_OFFERS_PER_CYCLE = 5
 
 PLATFORMS = ("reddit", "discord", "x")
 """Platforms that publish a post."""
@@ -122,6 +124,8 @@ class Settings:
     dry_run: bool
     log_level: str
     poll_interval_seconds: int
+    later_cooldown_minutes: int
+    max_offers_per_cycle: int
     media_dir: Path
     database_path: Path
     profiles_file: Path
@@ -367,6 +371,15 @@ def load_settings(profiles_file: Path | None = None, *, load_env: bool = True) -
     if poll_interval is not None and poll_interval < 10:
         parser.fail("config.poll_interval_seconds", "must be at least 10 seconds")
 
+    later_cooldown = parser.integer(
+        raw, "later_cooldown_minutes", "config", default=DEFAULT_LATER_COOLDOWN_MINUTES
+    )
+    max_offers = parser.integer(
+        raw, "max_offers_per_cycle", "config", default=DEFAULT_MAX_OFFERS_PER_CYCLE
+    )
+    if max_offers is not None and max_offers < 1:
+        parser.fail("config.max_offers_per_cycle", "must be at least 1")
+
     if parser.problems:
         raise ConfigError(parser.problems)
 
@@ -376,6 +389,8 @@ def load_settings(profiles_file: Path | None = None, *, load_env: bool = True) -
         dry_run=_env_flag("DRY_RUN", default=True),
         log_level=os.environ.get("LOG_LEVEL", "INFO").strip().upper() or "INFO",
         poll_interval_seconds=poll_interval or DEFAULT_POLL_INTERVAL_SECONDS,
+        later_cooldown_minutes=later_cooldown or DEFAULT_LATER_COOLDOWN_MINUTES,
+        max_offers_per_cycle=max_offers or DEFAULT_MAX_OFFERS_PER_CYCLE,
         media_dir=Path(str(raw.get("media_dir", "media"))),
         database_path=Path(str(raw.get("database_path", "crosspost.db"))),
         profiles_file=path,

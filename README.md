@@ -29,8 +29,8 @@ Drive inbox/ ──▶ queue ──▶ Telegram: ✅ Approve / ❌ Decline / ⏭
 | --- | --- | --- |
 | 0 | Scaffold, config, README | **done** |
 | 1 | Telegram core — allow-listed chat, approval buttons | **done** |
-| 2 | Drive queue + SQLite state | next |
-| 3 | Discord publishing | |
+| 2 | Drive queue + SQLite state | **done** |
+| 3 | Discord publishing | next |
 | 4 | Reddit publishing — native video, link passthrough | |
 | 5 | Hardening — Retry, restart reconciliation, Docker | |
 
@@ -47,11 +47,36 @@ In an allow-listed chat the bot answers two commands:
 
 | Command | Effect |
 | --- | --- |
-| `/start` | Confirms which profile the chat is bound to and echoes the chat id. |
-| `/test` | Sends `assets/test.png` as an approval card, to check the buttons work. |
+| `/start` | Names the profile, reports whether Drive is connected, and shows the queue. |
+| `/test` | Queues the bundled `assets/test.png` and sends it as an approval card. |
+| *send a photo or video* | Queues it exactly like a Drive file — see below. |
 
 Every update from any other chat is ignored — but its chat id is logged at INFO, which is
 how you onboard a new chat without loosening the allow-list.
+
+Without a service-account file the bot still runs; it logs that Drive polling is off and
+media sent directly to it still queues. That makes the whole approval loop testable before
+any Google setup exists.
+
+### The queue
+
+A file in a `inbox` folder becomes an item in SQLite, is downloaded to `media/`, and is
+sent to the profile's chat as an approval card:
+
+- **✅ Approve** — moves to `awaiting_text` (the caption step is Phase 3).
+- **❌ Decline** — the Drive file is moved to `rejected/` and the local copy deleted.
+  Nothing is ever hard-deleted.
+- **⏭ Later** — back to the queue, re-offered after `later_cooldown_minutes` (default 60)
+  so the next poll does not immediately show the same card again.
+
+Media sent straight to the bot joins the same queue. It has no Drive file behind it, so it
+is never archive-moved. Telegram caps what a bot may **download** at 20 MB — well under
+what it may send — so anything larger is refused with an explanation rather than failing
+silently; put those in the Drive inbox instead.
+
+Offers are capped at `max_offers_per_cycle` (default 5) per poll, because Telegram
+rate-limits bulk sends to one chat. Dropping 40 files into the inbox trickles them out
+over cycles rather than getting throttled.
 
 ## Quick start
 
@@ -115,10 +140,57 @@ Obtained per phase, so you only ever chase what the next step needs.
 6. Put that number in `profiles.yaml` as `telegram_chat_id`. Any update from any other
    chat is silently ignored.
 
-### Google Drive service account — Phase 2
+### Google Drive service account — needed for Phase 2
+
+A service account is a robot Google account with its own email address. You share your
+folders with it exactly as you would with a colleague; it can only ever see what you share.
+
+**1. Make a project and turn on the API**
+
+1. Go to [console.cloud.google.com](https://console.cloud.google.com) and sign in with the
+   Google account that owns the Drive folders.
+2. Project dropdown (top bar) → **New project** → name it e.g. `crosspost-engine` →
+   **Create**, then make sure it is selected.
+3. Search bar → **Google Drive API** → **Enable**. Nothing works without this step.
+
+**2. Create the service account and its key**
+
+4. Navigation menu → **IAM & Admin** → **Service Accounts** → **Create service account**.
+5. Name it e.g. `crosspost-bot` → **Create and continue** → skip the optional role and
+   user-access steps → **Done**. You do *not* need to grant it any project role; all its
+   power comes from Drive sharing.
+6. Click the new account → **Keys** tab → **Add key** → **Create new key** → **JSON** →
+   **Create**. A `.json` file downloads. **This is a credential — treat it like a password.**
+7. Put that file in the project folder as `service-account.json` (it is gitignored), and
+   point `GOOGLE_SERVICE_ACCOUNT_FILE` at it in `.env`.
+
+**3. Share your folders with it**
+
+8. Open the downloaded JSON and copy the `"client_email"` value. It looks like
+   `crosspost-bot@your-project.iam.gserviceaccount.com`.
+9. In Google Drive, create a parent folder for the brand with three subfolders inside it:
+   `inbox`, `posted`, `rejected`. The app never creates or deletes folders, so these must
+   exist first.
+10. Right-click the **parent** folder → **Share** → paste the `client_email` → set it to
+    **Editor** → uncheck "Notify people" → **Share**. Editor is required because archiving
+    moves a file between folders.
+
+**4. Get the three folder ids**
+
+11. Open each subfolder in Drive and read the id out of the address bar — it is the part
+    after `/folders/`:
+    `https://drive.google.com/drive/folders/`**`1a2B3cD4eF5gH6iJ7kL8mN9oP`**
+12. Put those three ids into `profiles.yaml` under `drive.inbox_folder_id`,
+    `posted_folder_id` and `rejected_folder_id`.
+
+**5. Check it**
+
+`python -m app` logs the service-account address on startup, and any folder it cannot
+reach is reported rather than silently skipped. If files never appear, the usual cause is
+step 10 — the folder was not shared, or was shared as Viewer instead of Editor.
+
 ### Discord webhook — Phase 3
 ### Reddit script app — Phase 4
-### RedGifs account — Phase 5
 
 Step-by-step guides land here as each phase is built.
 
@@ -224,10 +296,15 @@ app/
   service.py         composition root: one event loop, ordered shutdown
   config.py          .env + profiles.yaml loading and validation
   models.py          Item, ItemStatus, the caption convention
+  db.py              SQLite state: the queue and per-platform results
+  drive.py           Google Drive v3 via a service account (list/download/move)
+  intake.py          getting media into the queue and archiving it out again
+  poller.py          the Drive poll loop
   logging_setup.py   logging + secret redaction
   telegram/
     bot.py           Application construction and the chat allow-list
-    handlers.py      commands, approval keyboard, size-aware send helper
+    handlers.py      commands, approval taps, media sent to the bot
+    cards.py         message composition — no database, no network
   platforms/
     base.py          the publisher interface: item + caption in, result out
 assets/test.png      approval card used by /test
