@@ -1,0 +1,85 @@
+# Per-profile settings. One brand = one profile; all profiles run in the same process.
+#
+# This file holds NO secrets. Credentials are referenced by the *name* of the environment
+# variable that holds them (the `*_env` keys), so this file is safe to commit.
+
+poll_interval_seconds: 120
+media_dir: media
+database_path: crosspost.db
+
+profiles:
+  - name: brand_a
+    # Your private chat with the bot. The bot ignores every update from anywhere else.
+    # See README → "Telegram bot token and chat id" for how to find this number.
+    telegram_chat_id: 123456789
+
+    # Create these three folders yourself and share the parent with the service account.
+    # The app only lists, downloads and moves — it never creates or deletes folders.
+    drive:
+      inbox_folder_id: "REPLACE_WITH_INBOX_FOLDER_ID"
+      posted_folder_id: "REPLACE_WITH_POSTED_FOLDER_ID"
+      rejected_folder_id: "REPLACE_WITH_REJECTED_FOLDER_ID"
+
+    reddit:
+      enabled: true
+      subreddit: examplesubreddit
+      nsfw: true            # required for NSFW subs — unflagged posts get removed
+      flair_text: null      # many subs reject unflaired posts; set one if yours does
+      flair_id: null
+      client_id_env: REDDIT_CLIENT_ID_BRAND_A
+      client_secret_env: REDDIT_CLIENT_SECRET_BRAND_A
+      username_env: REDDIT_USERNAME_BRAND_A
+      password_env: REDDIT_PASSWORD_BRAND_A
+
+    discord:
+      enabled: true
+      webhook_env: DISCORD_WEBHOOK_BRAND_A
+
+    # Media host, not a posting target. Video goes here first and the resulting
+    # redgifs.com link is what gets posted — Reddit and Discord both render it as an
+    # inline player, which also sidesteps Discord's 10 MiB webhook attachment limit.
+    redgifs:
+      enabled: true
+      username_env: REDGIFS_USERNAME_BRAND_A
+      password_env: REDGIFS_PASSWORD_BRAND_A
+      default_tags: []
+      private: false
+
+    # X is not implemented in this build. It has had no free tier since Feb 2026 —
+    # posting is $0.015/request, or $0.200/request when the text contains a URL.
+    # See README → "X (deferred)". Setting this to true is a config error today.
+    x:
+      enabled: false
+
+  - name: brand_b
+    telegram_chat_id: 987654321
+
+    drive:
+      inbox_folder_id: "REPLACE_WITH_INBOX_FOLDER_ID_B"
+      posted_folder_id: "REPLACE_WITH_POSTED_FOLDER_ID_B"
+      rejected_folder_id: "REPLACE_WITH_REJECTED_FOLDER_ID_B"
+
+    reddit:
+      enabled: false
+      subreddit: null
+      nsfw: false
+      flair_text: null
+      flair_id: null
+      client_id_env: REDDIT_CLIENT_ID_BRAND_B
+      client_secret_env: REDDIT_CLIENT_SECRET_BRAND_B
+      username_env: REDDIT_USERNAME_BRAND_B
+      password_env: REDDIT_PASSWORD_BRAND_B
+
+    discord:
+      enabled: true
+      webhook_env: DISCORD_WEBHOOK_BRAND_B
+
+    redgifs:
+      enabled: false
+      username_env: REDGIFS_USERNAME_BRAND_B
+      password_env: REDGIFS_PASSWORD_BRAND_B
+      default_tags: []
+      private: false
+
+    x:
+      enabled: false

@@ -1,0 +1,18 @@
+# Pinned to the versions current on 2026-08-13.
+# See README "Dependency notes" for why each one is here.
+
+python-telegram-bot==22.8      # Telegram bot (async). Brings httpx.
+google-api-python-client==2.198.0  # Google Drive API v3 (sync; called via asyncio.to_thread)
+google-auth==2.56.3            # Service-account credentials for the above
+asyncpraw==8.0.3               # Reddit. NOTE: 8.x merged submit_image/submit_video into submit()
+httpx==0.28.1                  # Discord webhook + RedGifs upload. Must satisfy PTB's <0.29,>=0.27
+aiosqlite==0.22.1              # State
+
+# Config plumbing implied by the spec's own choices (.env + profiles.yaml)
+PyYAML==6.0.3
+python-dotenv==1.2.2
+
+# Deliberately absent:
+#   tweepy — X is deferred (no free tier since Feb 2026), and current tweepy has no
+#            v2 media upload anyway. See README "X (deferred)".
+#   redgifs — the PyPI package is read-only (no upload support). Plain httpx instead.
