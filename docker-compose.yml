@@ -1,0 +1,27 @@
+services:
+  crosspost:
+    build: .
+    container_name: crosspost-engine
+
+    # Survives a reboot and restarts itself if the process ever dies.
+    restart: unless-stopped
+
+    env_file:
+      - .env
+
+    volumes:
+      # Config, read-only — the container never needs to change these.
+      - ./profiles.yaml:/srv/profiles.yaml:ro
+      - ./service-account.json:/srv/service-account.json:ro
+      # State: the queue database and downloaded media. Survives rebuilds.
+      - ./data:/data
+
+    environment:
+      GOOGLE_SERVICE_ACCOUNT_FILE: /srv/service-account.json
+
+    # Keep a bounded amount of logs rather than growing without limit.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

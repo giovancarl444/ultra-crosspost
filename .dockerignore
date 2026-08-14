@@ -1,0 +1,14 @@
+.git
+.venv
+data
+media
+*.db
+*.db-wal
+*.db-shm
+.env
+service-account*.json
+profiles.yaml
+__pycache__
+**/__pycache__
+scripts
+README.md

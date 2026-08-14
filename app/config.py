@@ -392,8 +392,12 @@ def load_settings(profiles_file: Path | None = None, *, load_env: bool = True) -
         poll_interval_seconds=poll_interval or DEFAULT_POLL_INTERVAL_SECONDS,
         later_cooldown_minutes=later_cooldown or DEFAULT_LATER_COOLDOWN_MINUTES,
         max_offers_per_cycle=max_offers or DEFAULT_MAX_OFFERS_PER_CYCLE,
-        media_dir=Path(str(raw.get("media_dir", "media"))),
-        database_path=Path(str(raw.get("database_path", "crosspost.db"))),
+        # Env wins over the file so the container can redirect both onto a mounted
+        # volume without the operator editing their profiles.yaml.
+        media_dir=Path(os.environ.get("MEDIA_DIR") or str(raw.get("media_dir", "media"))),
+        database_path=Path(
+            os.environ.get("DATABASE_PATH") or str(raw.get("database_path", "crosspost.db"))
+        ),
         profiles_file=path,
         telegram_bot_token=SecretRef("TELEGRAM_BOT_TOKEN", "BotFather token for the bot"),
         google_service_account_file=Path(service_account) if service_account else None,

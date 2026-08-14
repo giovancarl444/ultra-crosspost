@@ -115,6 +115,63 @@ value and it makes no network calls, so it is safe to run at any point.
 
 Exit codes: `0` complete · `1` valid but credentials missing · `2` config invalid.
 
+## Running it on Windows with Docker Desktop
+
+The engine is a daemon — it has to stay running to poll Drive. These steps need no
+terminal; the `.bat` files are double-clickable.
+
+**1. Install Docker Desktop** from [docker.com](https://www.docker.com/products/docker-desktop/)
+and launch it. Wait until the bottom-left says **Engine running**. In its Settings, tick
+**Start Docker Desktop when you log in** so the engine comes back after a reboot.
+
+**2. Get the code.** On the GitHub repo page: green **Code** button → **Download ZIP** →
+extract it somewhere permanent, e.g. `C:\crosspost-engine`. (No git required.)
+
+**3. Put your three config files in that folder**, next to `docker-compose.yml`:
+
+| File | From |
+| --- | --- |
+| `.env` | copy `.env.example`, fill in the secrets |
+| `profiles.yaml` | copy `profiles.example.yaml`, fill in chats and folder ids |
+| `service-account.json` | the key you downloaded from Google Cloud |
+
+To copy a file in Explorer: right-click → Copy, right-click → Paste, then rename. Make sure
+Explorer is showing file extensions (View → Show → File name extensions) so you don't end
+up with `.env.txt`.
+
+**4. Double-click `windows\check-config.bat`** — it prints your profiles and lists any
+missing credentials by name. It never prints a secret value.
+
+**5. Double-click `windows\start.bat`.** The first run builds the image and takes a few
+minutes. After that it starts in seconds and keeps running in the background.
+
+| File | What it does |
+| --- | --- |
+| `windows\start.bat` | Starts the engine. Safe to run again; it just restarts. |
+| `windows\logs.bat` | Live log. Closing the window does **not** stop the engine. |
+| `windows\stop.bat` | Stops it. The queue and downloaded media are kept. |
+| `windows\check-config.bat` | Validates config without starting anything. |
+
+`restart: unless-stopped` means the engine survives a reboot and restarts itself if it ever
+crashes. Your queue lives in `data\crosspost.db` and downloaded media in `data\media\`,
+both outside the container, so rebuilding never loses state.
+
+**The catch with this setup:** it only runs while your PC is on and online. Approvals you
+tap while it is asleep will not go anywhere until it wakes. If that becomes annoying, the
+same `docker compose up -d` runs unchanged on any always-on Linux host.
+
+### Rotating credentials
+
+Anything pasted into a chat should be considered burned. Before real use:
+
+- Telegram: `/revoke` in BotFather, then put the new token in `.env`.
+- Google: Cloud Console → Service Accounts → your account → **Keys** → delete the old key,
+  **Add key** → JSON, and replace `service-account.json`.
+- Discord: Server Settings → Integrations → Webhooks → delete and recreate, update `.env`.
+
+Note that `docker compose config` prints your environment in full, secrets included — handy
+for debugging, but don't paste its output anywhere.
+
 ## Configuration
 
 Two files, with a firm split:
