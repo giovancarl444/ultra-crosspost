@@ -12,6 +12,9 @@ profiles.yaml
 # Local state
 media/*
 !media/.gitkeep
+# Docker bind-mount state: the queue database and downloaded brand media.
+# Created by docker-compose.yml (./data:/data), so it only appears on the container path.
+data/
 *.db
 *.db-journal
 *.db-wal
