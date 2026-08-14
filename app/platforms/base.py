@@ -65,8 +65,18 @@ class PostRequest:
     dry_run: bool = True
 
     @property
+    def caption(self) -> str:
+        """What platforms with no title field post.
+
+        By the caption convention the body *is* the caption. When the operator wrote only
+        one line there is no body, so the title doubles as the caption rather than
+        publishing an empty message.
+        """
+        return self.body or self.title
+
+    @property
     def full_text(self) -> str:
-        """Title and body as a single block, for platforms that have no separate title."""
+        """Title and body as a single block."""
         return f"{self.title}\n\n{self.body}".strip() if self.body else self.title
 
 

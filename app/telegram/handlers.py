@@ -1,36 +1,43 @@
-"""Telegram handlers: commands, approval taps, and media sent straight to the bot."""
+"""Telegram handlers: commands, the approval → caption → preview → post conversation,
+and media sent straight to the bot."""
 
 from __future__ import annotations
 
 import logging
 from pathlib import Path
 
-from telegram import Update
+from telegram import ForceReply, Update
 from telegram.constants import FileSizeLimit
 from telegram.ext import ContextTypes
 
 from app import db
 from app.config import Profile
-from app.intake import (
-    Runtime,
-    archive,
-    enqueue_telegram_media,
-    local_path_for,
-    offer,
+from app.intake import Runtime, archive, enqueue_telegram_media, local_path_for, offer
+from app.models import ItemStatus, split_caption
+from app.platforms.base import PostStatus
+from app.platforms.discord import ATTACHMENT_LIMIT as DISCORD_ATTACHMENT_LIMIT
+from app.platforms.discord import CONTENT_LIMIT as DISCORD_CONTENT_LIMIT
+from app.publish import publish_item
+from app.telegram.cards import (
+    CALLBACK_SEPARATOR,
+    Action,
+    close_card,
+    format_size,
+    preview_keyboard,
+    preview_text,
+    results_text,
+    retry_keyboard,
 )
-from app.models import ItemStatus
-from app.telegram.cards import CALLBACK_SEPARATOR, Action, close_card, format_size
 
 log = logging.getLogger(__name__)
 
 RUNTIME = "runtime"
 TEST_IMAGE = Path("assets/test.png")
 
-OUTCOME = {
-    Action.APPROVE: "✅ Approved\nThe caption step arrives in Phase 3.",
-    Action.DECLINE: "❌ Declined",
-    Action.LATER: "⏭ Skipped for now",
-}
+TEXT_PROMPT = (
+    "✅ Approved — now send the post text.\n\n"
+    "First line becomes the Reddit title; everything after it is the caption."
+)
 
 
 def _runtime(context: ContextTypes.DEFAULT_TYPE) -> Runtime:
@@ -43,6 +50,9 @@ def _profile_for(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> Profile | 
     )
 
 
+# -- commands ---------------------------------------------------------------------------
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     rt, chat = _runtime(context), update.effective_chat
     profile = _profile_for(context, chat.id)
@@ -50,7 +60,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     counts = await db.counts_by_status(rt.conn, profile.name)
     queue = ", ".join(f"{n} {status}" for status, n in sorted(counts.items())) or "empty"
-    drive_state = "connected" if rt.drive else "not configured"
     log.info("chat %s: /start", chat.id)
     await context.bot.send_message(
         chat_id=chat.id,
@@ -58,7 +67,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             f"Crosspost Engine is up.\n\n"
             f"profile: {profile.name}\n"
             f"platforms: {', '.join(profile.enabled_platforms) or 'none'}\n"
-            f"drive: {drive_state}\n"
+            f"drive: {'connected' if rt.drive else 'not configured'}\n"
+            f"mode: {'DRY RUN — nothing publishes' if rt.settings.dry_run else 'LIVE'}\n"
             f"queue: {queue}\n\n"
             "Send me a photo or video to queue it, or /test for a sample card."
         ),
@@ -66,7 +76,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def test(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Queue the bundled test image as a real item, so the whole path gets exercised."""
+    """Queue the bundled test image as a real item, exercising the whole path."""
     rt, chat = _runtime(context), update.effective_chat
     profile = _profile_for(context, chat.id)
     if profile is None:
@@ -90,6 +100,9 @@ async def test(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await db.set_local_path(rt.conn, item.id, destination)
     item.local_path = str(destination)
     await offer(rt, profile, item)
+
+
+# -- ingestion --------------------------------------------------------------------------
 
 
 async def on_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -129,9 +142,7 @@ async def on_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
         return
 
-    item = await enqueue_telegram_media(
-        rt, profile, filename=filename, mime=mime, size_bytes=size
-    )
+    item = await enqueue_telegram_media(rt, profile, filename=filename, mime=mime, size_bytes=size)
     if item is None:
         await message.reply_text("Could not queue that.")
         return
@@ -146,8 +157,66 @@ async def on_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await offer(rt, profile, item)
 
 
+async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """A plain message is the post text for whichever item is awaiting one."""
+    rt, chat, message = _runtime(context), update.effective_chat, update.effective_message
+    profile = _profile_for(context, chat.id)
+    if profile is None:
+        return
+
+    item = await db.active_item(rt.conn, profile.name)
+    if item is None or item.status is not ItemStatus.AWAITING_TEXT:
+        return  # nothing is waiting for text; stay quiet rather than backseat-driving
+
+    title, body = split_caption(message.text or "")
+    if not title:
+        await message.reply_text("That was empty — send the post text.")
+        return
+
+    await db.set_caption(rt.conn, item.id, title, body)
+    item.title, item.body = title, body
+    log.info("item %d: caption set (%d chars)", item.id, len(message.text or ""))
+    await _send_preview(rt, profile, item, chat.id)
+
+
+async def _send_preview(rt: Runtime, profile: Profile, item, chat_id: int) -> None:
+    await rt.bot.send_message(
+        chat_id=chat_id,
+        text=preview_text(
+            filename=item.filename,
+            title=item.title or "",
+            body=item.body or "",
+            platforms=profile.enabled_platforms,
+            warnings=_warnings(profile, item),
+        ),
+        reply_markup=preview_keyboard(item.id),
+    )
+
+
+def _warnings(profile: Profile, item) -> list[str]:
+    """Everything worth knowing *before* tapping Post rather than after."""
+    problems = []
+    caption = item.body or item.title or ""
+    if profile.discord.enabled and len(caption) > DISCORD_CONTENT_LIMIT:
+        problems.append(
+            f"caption is {len(caption)} characters — Discord rejects anything over "
+            f"{DISCORD_CONTENT_LIMIT}, so it would fail"
+        )
+    if profile.discord.enabled and item.size_bytes > DISCORD_ATTACHMENT_LIMIT:
+        problems.append(
+            f"{format_size(item.size_bytes)} is over Discord's 10 MiB webhook limit — it "
+            "will post the text without the file"
+        )
+    if not profile.enabled_platforms:
+        problems.append("no platforms are enabled, so Post will not publish anywhere")
+    return problems
+
+
+# -- buttons ----------------------------------------------------------------------------
+
+
 async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle an approval tap.
+    """Handle a tap.
 
     Callback queries carry no chat filter of their own, so the allow-list is re-checked
     here rather than relying on the filter guarding the message handlers.
@@ -172,25 +241,106 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await query.answer("That item is gone.")
         await close_card(query.message, "⚠️ Item no longer in the queue.")
         return
-    if item.status is not ItemStatus.PENDING_APPROVAL:
+
+    handlers = {
+        Action.APPROVE: _approve,
+        Action.DECLINE: _decline,
+        Action.LATER: _later,
+        Action.POST: _post,
+        Action.EDIT: _edit,
+        Action.CANCEL: _cancel,
+        Action.RETRY: _post,
+    }
+    expected = {
+        Action.APPROVE: ItemStatus.PENDING_APPROVAL,
+        Action.DECLINE: ItemStatus.PENDING_APPROVAL,
+        Action.LATER: ItemStatus.PENDING_APPROVAL,
+        Action.POST: ItemStatus.PREVIEWING,
+        Action.EDIT: ItemStatus.PREVIEWING,
+        Action.CANCEL: ItemStatus.PREVIEWING,
+        Action.RETRY: ItemStatus.FAILED,
+    }[action]
+
+    if item.status is not expected:
         await query.answer("Already handled.")
-        await close_card(query.message, f"⚠️ Already {item.status}.")
+        await close_card(query.message, f"⚠️ Ignored — item is {item.status}, not {expected}.")
         return
 
-    await query.answer()
     log.info("chat %s: %s item %d", chat.id, action.value, item.id)
+    await handlers[action](rt, profile, item, query)
 
-    outcome = OUTCOME[action]
-    if action is Action.DECLINE:
-        problem = await archive(rt, item, status=ItemStatus.DECLINED)
-        outcome += "\nMoved to rejected/." if problem is None else f"\n⚠️ {problem}"
-    elif action is Action.LATER:
-        await db.defer(rt.conn, item.id, rt.settings.later_cooldown_minutes)
-        outcome += f"\nBack in about {rt.settings.later_cooldown_minutes} min."
-    else:
-        await db.set_status(rt.conn, item.id, ItemStatus.AWAITING_TEXT)
 
+async def _approve(rt: Runtime, profile: Profile, item, query) -> None:
+    busy = await db.active_item(rt.conn, profile.name)
+    if busy is not None:
+        # One conversation at a time, otherwise a reply carrying the post text would be
+        # ambiguous. Leave this card tappable so it can be approved once the other is done.
+        await query.answer(
+            f"Finish item {busy.id} first — it is still {busy.status}.", show_alert=True
+        )
+        return
+    await query.answer()
+    await db.set_status(rt.conn, item.id, ItemStatus.AWAITING_TEXT)
+    await close_card(query.message, "✅ Approved")
+    await rt.bot.send_message(
+        chat_id=profile.telegram_chat_id,
+        text=TEXT_PROMPT,
+        reply_markup=ForceReply(input_field_placeholder="Title line, then the caption"),
+    )
+
+
+async def _decline(rt: Runtime, profile: Profile, item, query) -> None:
+    await query.answer()
+    problem = await archive(rt, item, status=ItemStatus.DECLINED)
+    outcome = "❌ Declined\nMoved to rejected/." if problem is None else f"❌ Declined\n⚠️ {problem}"
     await close_card(query.message, outcome)
+
+
+async def _later(rt: Runtime, profile: Profile, item, query) -> None:
+    await query.answer()
+    await db.defer(rt.conn, item.id, rt.settings.later_cooldown_minutes)
+    await close_card(
+        query.message, f"⏭ Skipped\nBack in about {rt.settings.later_cooldown_minutes} min."
+    )
+
+
+async def _edit(rt: Runtime, profile: Profile, item, query) -> None:
+    await query.answer()
+    await db.set_status(rt.conn, item.id, ItemStatus.AWAITING_TEXT)
+    await close_card(query.message, "✏️ Discarded — send the replacement text.")
+    await rt.bot.send_message(
+        chat_id=profile.telegram_chat_id,
+        text="Send the new post text.",
+        reply_markup=ForceReply(input_field_placeholder="Title line, then the caption"),
+    )
+
+
+async def _cancel(rt: Runtime, profile: Profile, item, query) -> None:
+    await query.answer()
+    await db.defer(rt.conn, item.id, rt.settings.later_cooldown_minutes)
+    await close_card(query.message, "✖️ Cancelled — the item goes back to the queue.")
+
+
+async def _post(rt: Runtime, profile: Profile, item, query) -> None:
+    """The only path that publishes anything."""
+    await query.answer("Posting…")
+    await db.set_status(rt.conn, item.id, ItemStatus.POSTING)
+    await close_card(query.message, "🚀 Posting…")
+
+    results = await publish_item(rt, profile, item)
+    failed = [r for r in results if r.status is PostStatus.FAILED]
+
+    await rt.bot.send_message(
+        chat_id=profile.telegram_chat_id,
+        text=results_text(results, dry_run=rt.settings.dry_run),
+        reply_markup=retry_keyboard(item.id) if failed else None,
+        disable_web_page_preview=True,
+    )
+    settled = await db.get_item(rt.conn, item.id)
+    if settled and settled.status is ItemStatus.POSTED and item.drive_file_id:
+        await rt.bot.send_message(
+            chat_id=profile.telegram_chat_id, text="📁 Drive file moved to posted/."
+        )
 
 
 async def log_ignored(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

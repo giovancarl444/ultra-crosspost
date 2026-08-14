@@ -30,9 +30,9 @@ Drive inbox/ ──▶ queue ──▶ Telegram: ✅ Approve / ❌ Decline / ⏭
 | 0 | Scaffold, config, README | **done** |
 | 1 | Telegram core — allow-listed chat, approval buttons | **done** |
 | 2 | Drive queue + SQLite state | **done** |
-| 3 | Discord publishing | next |
-| 4 | Reddit publishing — native video, link passthrough | |
-| 5 | Hardening — Retry, restart reconciliation, Docker | |
+| 3 | Discord publishing — caption, preview, post, retry | **done** |
+| 4 | Reddit publishing — native video, link passthrough | next |
+| 5 | Hardening — restart reconciliation, Docker | |
 
 X is **not** in the roadmap — see [X (deferred)](#x-deferred).
 
@@ -73,6 +73,26 @@ Media sent straight to the bot joins the same queue. It has no Drive file behind
 is never archive-moved. Telegram caps what a bot may **download** at 20 MB — well under
 what it may send — so anything larger is refused with an explanation rather than failing
 silently; put those in the Drive inbox instead.
+
+### Approve → caption → preview → post
+
+Approve starts a short conversation:
+
+1. The bot asks for the post text. **First line is the Reddit title; everything after it is
+   the caption** used for the Discord message and the Reddit body.
+2. It replies with a preview — what goes where, plus any warning worth knowing *before*
+   publishing (caption over Discord's 2000 characters, file over the 10 MiB webhook limit,
+   no platforms enabled) — and three buttons: **🚀 Post**, **✏️ Edit text**, **✖️ Cancel**.
+3. Only 🚀 Post publishes. Platforms run concurrently, and the result message reports each
+   one with ✅ posted / ⚠️ posted but degraded / ❌ failed, with links.
+4. If anything failed, a **🔁 Retry failed** button re-attempts *only* the platforms that
+   did not succeed. A platform that already posted is never posted to again — that is
+   enforced by the `post_results` table, so it survives a restart too.
+5. When every enabled platform has succeeded, the Drive file moves to `posted/`.
+
+Only one item per profile can be between Approve and Post at a time. Approving a second
+one says so rather than accepting it, because otherwise a reply carrying the post text
+would be ambiguous about which item it belonged to.
 
 Offers are capped at `max_offers_per_cycle` (default 5) per poll, because Telegram
 rate-limits bulk sends to one chat. Dropping 40 files into the inbox trickles them out
@@ -125,6 +145,16 @@ added, and `--check-config` labels it rather than failing.
 
 `DRY_RUN=true` (the default) runs the entire flow and simulates the platform calls,
 logging what would have been posted and returning fake URLs.
+
+### Keeping credentials out of git
+
+`scripts/scan-secrets.sh` refuses to commit anything matching a bot token, Discord webhook,
+private key, service-account JSON or AWS key, and refuses `.env`, `service-account*.json`
+and `profiles.yaml` whatever their contents. Install it as a hook once per clone:
+
+```bash
+git config core.hooksPath scripts/githooks
+```
 
 ## Credentials
 
@@ -196,7 +226,18 @@ folders with it exactly as you would with a colleague; it can only ever see what
 reach is reported rather than silently skipped. If files never appear, the usual cause is
 step 10 — the folder was not shared, or was shared as Viewer instead of Editor.
 
-### Discord webhook — Phase 3
+### Discord webhook — needed for Phase 3
+
+1. In Discord, open **Server Settings** → **Integrations** → **Webhooks** → **New Webhook**.
+2. Pick the channel it should post into, give it a name, then **Copy Webhook URL**.
+3. Put that URL in `.env` under the variable named by the profile's `webhook_env`
+   (e.g. `DISCORD_WEBHOOK_APD=`). **The URL is the credential** — anyone holding it can post
+   to that channel, so it never goes in `profiles.yaml`.
+
+No bot invite or OAuth is involved; a webhook posts on its own. Uploads are capped at
+10 MiB unless the server is boosted, so larger video posts the caption and link instead and
+is reported as ⚠️ rather than ✅.
+
 ### Reddit script app — Phase 4
 
 Step-by-step guides land here as each phase is built.
@@ -308,13 +349,17 @@ app/
   intake.py          getting media into the queue and archiving it out again
   poller.py          the Drive poll loop
   logging_setup.py   logging + secret redaction
+  publish.py         fan an approved item out to every platform, concurrently
   telegram/
     bot.py           Application construction and the chat allow-list
-    handlers.py      commands, approval taps, media sent to the bot
+    handlers.py      commands, the approval conversation, media sent to the bot
     cards.py         message composition — no database, no network
   platforms/
     base.py          the publisher interface: item + caption in, result out
+    discord.py       webhook publishing
 assets/test.png      approval card used by /test
+scripts/
+  scan-secrets.sh    refuses to commit anything that looks like a credential
 ```
 
 `platforms/` is deliberately free of any Telegram or Drive concept, so a future web UI

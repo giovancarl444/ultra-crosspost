@@ -32,6 +32,9 @@ def build_application(settings: Settings) -> Application:
     application.add_handler(CommandHandler("start", handlers.start, filters=allowed))
     application.add_handler(CommandHandler("test", handlers.test, filters=allowed))
     application.add_handler(MessageHandler(allowed & MEDIA, handlers.on_media))
+    application.add_handler(
+        MessageHandler(allowed & filters.TEXT & ~filters.COMMAND, handlers.on_text)
+    )
     application.add_handler(CallbackQueryHandler(handlers.on_button))
     application.add_handler(MessageHandler(~allowed, handlers.log_ignored), group=IGNORED_GROUP)
 

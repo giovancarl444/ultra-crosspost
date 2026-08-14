@@ -196,6 +196,63 @@ async def known_drive_file_ids(conn: aiosqlite.Connection, profile: str) -> set[
         return {row["drive_file_id"] for row in await cursor.fetchall()}
 
 
+async def set_caption(conn: aiosqlite.Connection, item_id: int, title: str, body: str) -> None:
+    await _set(conn, item_id, title=title, body=body, status=ItemStatus.PREVIEWING)
+
+
+async def active_item(conn: aiosqlite.Connection, profile: str) -> Item | None:
+    """The item currently mid-conversation, if any.
+
+    Only one item per profile may be between Approve and Post at a time — otherwise a
+    reply carrying the post text would be ambiguous about which item it belongs to.
+    """
+    async with conn.execute(
+        """
+        SELECT * FROM items
+        WHERE profile = ? AND status IN (?, ?)
+        ORDER BY updated_at DESC, id DESC LIMIT 1
+        """,
+        (profile, ItemStatus.AWAITING_TEXT, ItemStatus.PREVIEWING),
+    ) as cursor:
+        row = await cursor.fetchone()
+    return _to_item(row) if row else None
+
+
+async def record_result(
+    conn: aiosqlite.Connection, item_id: int, platform: str, status: str, url: str | None,
+    detail: str | None,
+) -> None:
+    await conn.execute(
+        """
+        INSERT INTO post_results (item_id, platform, status, url, detail, posted_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT (item_id, platform) DO UPDATE SET
+            status = excluded.status, url = excluded.url,
+            detail = excluded.detail, posted_at = excluded.posted_at
+        """,
+        (item_id, platform, status, url, detail, _now()),
+    )
+    await conn.commit()
+
+
+async def results_for(conn: aiosqlite.Connection, item_id: int) -> list[dict]:
+    async with conn.execute(
+        "SELECT platform, status, url, detail FROM post_results WHERE item_id = ? ORDER BY platform",
+        (item_id,),
+    ) as cursor:
+        return [dict(row) for row in await cursor.fetchall()]
+
+
+async def succeeded_platforms(conn: aiosqlite.Connection, item_id: int) -> set[str]:
+    """Platforms this item already posted to. Never posted to twice — not on Retry, not
+    after a restart."""
+    async with conn.execute(
+        "SELECT platform FROM post_results WHERE item_id = ? AND status IN ('ok', 'degraded')",
+        (item_id,),
+    ) as cursor:
+        return {row["platform"] for row in await cursor.fetchall()}
+
+
 async def counts_by_status(conn: aiosqlite.Connection, profile: str) -> dict[str, int]:
     async with conn.execute(
         "SELECT status, COUNT(*) AS n FROM items WHERE profile = ? GROUP BY status",

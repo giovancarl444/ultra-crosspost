@@ -20,21 +20,46 @@ class Action(StrEnum):
     APPROVE = "approve"
     DECLINE = "decline"
     LATER = "later"
+    POST = "post"
+    EDIT = "edit"
+    CANCEL = "cancel"
+    RETRY = "retry"
 
 
-BUTTONS = ((Action.APPROVE, "✅ Approve"), (Action.DECLINE, "❌ Decline"), (Action.LATER, "⏭ Later"))
+APPROVAL_BUTTONS = (
+    (Action.APPROVE, "✅ Approve"),
+    (Action.DECLINE, "❌ Decline"),
+    (Action.LATER, "⏭ Later"),
+)
+PREVIEW_BUTTONS = (
+    (Action.POST, "🚀 Post"),
+    (Action.EDIT, "✏️ Edit text"),
+    (Action.CANCEL, "✖️ Cancel"),
+)
 
 
-def approval_keyboard(item_id: int) -> InlineKeyboardMarkup:
+def _keyboard(item_id: int, buttons) -> InlineKeyboardMarkup:
     """callback_data stays well inside Telegram's 64-byte cap."""
     return InlineKeyboardMarkup(
         [
             [
                 InlineKeyboardButton(label, callback_data=f"{action}{CALLBACK_SEPARATOR}{item_id}")
-                for action, label in BUTTONS
+                for action, label in buttons
             ]
         ]
     )
+
+
+def approval_keyboard(item_id: int) -> InlineKeyboardMarkup:
+    return _keyboard(item_id, APPROVAL_BUTTONS)
+
+
+def preview_keyboard(item_id: int) -> InlineKeyboardMarkup:
+    return _keyboard(item_id, PREVIEW_BUTTONS)
+
+
+def retry_keyboard(item_id: int) -> InlineKeyboardMarkup:
+    return _keyboard(item_id, ((Action.RETRY, "🔁 Retry failed"),))
 
 
 def format_size(size_bytes: int) -> str:
@@ -101,6 +126,40 @@ async def send_approval_card(
             caption=truncate_caption(header),
             reply_markup=keyboard,
         )
+
+
+def preview_text(
+    *, filename: str, title: str, body: str, platforms: tuple[str, ...], warnings: list[str]
+) -> str:
+    """What goes out, shown before anything leaves the machine."""
+    lines = [
+        "📋 Preview",
+        f"file: {filename}",
+        f"to: {', '.join(platforms) or 'nothing enabled'}",
+        "",
+        f"title (Reddit): {title}",
+        "",
+        f"caption: {body}" if body else "caption: (title is reused as the caption)",
+    ]
+    if warnings:
+        lines += ["", *(f"⚠️ {w}" for w in warnings)]
+    lines += ["", "Nothing is published until you tap 🚀 Post."]
+    return "\n".join(lines)
+
+
+SYMBOL = {"ok": "✅", "degraded": "⚠️", "failed": "❌", "skipped": "⏭"}
+
+
+def results_text(results, *, dry_run: bool) -> str:
+    lines = ["🚀 Dry run — nothing was published" if dry_run else "🚀 Posted"]
+    for result in results:
+        line = f"{SYMBOL.get(result.status, '•')} {result.platform}"
+        if result.url:
+            line += f" — {result.url}"
+        if result.detail:
+            line += f"\n    {result.detail}"
+        lines.append(line)
+    return "\n".join(lines)
 
 
 async def close_card(message: Message | None, outcome: str) -> None:
