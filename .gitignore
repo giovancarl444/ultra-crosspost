@@ -5,6 +5,10 @@
 service-account*.json
 credentials*.json
 
+# Live config: real chat ids and folder ids. Start from profiles.example.yaml.
+profiles.yaml
+!profiles.example.yaml
+
 # Local state
 media/*
 !media/.gitkeep

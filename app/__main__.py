@@ -53,7 +53,7 @@ def check_config(settings: Settings) -> int:
     print(f"  database       {settings.database_path}")
 
     for profile in settings.profiles:
-        enabled = ", ".join(profile.enabled_platforms) or "none"
+        enabled = ", ".join(profile.enabled_platforms) or "none — queues and archives only"
         print(f"\nprofile: {profile.name}  ({enabled})")
         print("\n".join(_describe_profile(profile)))
 

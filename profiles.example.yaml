@@ -16,7 +16,7 @@ profiles:
   - name: brand_a
     # Your private chat with the bot. The bot ignores every update from anywhere else.
     # See README → "Telegram bot token and chat id" for how to find this number.
-    telegram_chat_id: 1915394365
+    telegram_chat_id: 123456789
 
     # Create these three folders yourself and share the parent with the service account.
     # The app only lists, downloads and moves — it never creates or deletes folders.

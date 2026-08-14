@@ -84,7 +84,8 @@ over cycles rather than getting throttled.
 python3.12 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 
-cp .env.example .env          # then fill it in
+cp .env.example .env                      # secrets
+cp profiles.example.yaml profiles.yaml    # brands, chats, Drive folders
 .venv/bin/python -m app --check-config
 ```
 
@@ -98,10 +99,16 @@ Exit codes: `0` complete · `1` valid but credentials missing · `2` config inva
 
 Two files, with a firm split:
 
-- **`profiles.yaml`** — everything that is not a secret. Committed. It refers to
+- **`profiles.yaml`** — brands, chat ids, Drive folder ids. Gitignored, because those
+  identify your accounts; `profiles.example.yaml` is the committed template. It refers to
   credentials only by the *name* of the environment variable holding them (`webhook_env:
-  DISCORD_WEBHOOK_BRAND_A`), so adding a brand never means touching code.
+  DISCORD_WEBHOOK_BRAND_A`), so it never contains a secret and adding a brand never means
+  touching code.
 - **`.env`** — every secret. Gitignored. Start from `.env.example`.
+
+A profile with no platforms enabled is allowed: it queues, shows approval cards and
+archives, but publishes nothing. That is the normal state while platforms are still being
+added, and `--check-config` labels it rather than failing.
 
 ### Profile keys
 

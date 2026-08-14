@@ -307,8 +307,9 @@ def _parse_profile(parser: _Parser, data: Any, index: int) -> Profile | None:
         x=XConfig(enabled=x_enabled),
     )
 
-    if not profile.enabled_platforms:
-        parser.fail(path, f"profile '{label}' has no enabled platforms — it would never post")
+    # A profile with no enabled platforms is legitimate — it queues and archives without
+    # publishing, which is exactly the state during buildout — so this is surfaced as a
+    # warning by --check-config rather than treated as a config error.
     return profile
 
 
