@@ -18,6 +18,7 @@ from app.config import Settings
 from app.drive import DriveClient
 from app.intake import Runtime
 from app.poller import poll_forever
+from app.reconcile import reconcile
 from app.telegram.bot import build_application
 from app.telegram.handlers import RUNTIME
 
@@ -60,13 +61,17 @@ async def run(settings: Settings) -> None:
 
     await application.initialize()
     await application.start()
-    # drop_pending_updates so a restart does not replay taps that were already handled.
+    # Pending updates are kept, not dropped: a tap made while the service was down is a
+    # real instruction, and every action already guards against the item's current status,
+    # so a replayed tap answers "already handled" instead of acting twice.
     await application.updater.start_polling(
-        drop_pending_updates=True, allowed_updates=Update.ALL_TYPES
+        drop_pending_updates=False, allowed_updates=Update.ALL_TYPES
     )
 
     me = await application.bot.get_me()
     log.info("@%s is online — %s", me.username, "DRY RUN" if settings.dry_run else "LIVE")
+
+    await reconcile(runtime)
 
     poller = asyncio.create_task(poll_forever(runtime, stop), name="drive-poller")
     try:

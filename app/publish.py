@@ -19,6 +19,7 @@ from app.intake import Runtime, archive
 from app.models import Item, ItemStatus
 from app.platforms.base import MediaRef, PostRequest, PostResult, PostStatus, Publisher
 from app.platforms.discord import DiscordPublisher
+from app.platforms.reddit import RedditPublisher
 
 log = logging.getLogger(__name__)
 
@@ -28,6 +29,13 @@ def build_publishers(
 ) -> list[Publisher]:
     """One publisher per platform that is enabled, configured, and not already done."""
     publishers: list[Publisher] = []
+    if profile.reddit.enabled and "reddit" not in skip:
+        missing = [s.env_var for s in profile.reddit.secrets() if not s.is_set]
+        if missing:
+            log.warning("reddit enabled for %s but unset: %s", profile.name, ", ".join(missing))
+        else:
+            publishers.append(RedditPublisher(profile.reddit, dry_run=rt.settings.dry_run))
+
     if profile.discord.enabled and profile.discord.webhook and "discord" not in skip:
         webhook = profile.discord.webhook.resolve_optional()
         if webhook:

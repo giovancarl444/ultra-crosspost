@@ -19,7 +19,15 @@ from app import db
 from app.config import Profile, Settings
 from app.drive import DriveClient, DriveFile
 from app.models import Item, ItemSource, ItemStatus
-from app.telegram.cards import drive_view_link, send_approval_card
+from app.platforms.discord import ATTACHMENT_LIMIT as DISCORD_ATTACHMENT_LIMIT
+from app.platforms.discord import CONTENT_LIMIT as DISCORD_CONTENT_LIMIT
+from app.telegram.cards import (
+    drive_view_link,
+    format_size,
+    preview_keyboard,
+    preview_text,
+    send_approval_card,
+)
 
 log = logging.getLogger(__name__)
 
@@ -108,6 +116,40 @@ async def offer(rt: Runtime, profile: Profile, item: Item) -> None:
     )
     await db.set_offered(rt.conn, item.id, message.message_id)
     log.info("offered item %d to chat %s", item.id, profile.telegram_chat_id)
+
+
+def preview_warnings(profile: Profile, item: Item) -> list[str]:
+    """Everything worth knowing *before* tapping Post rather than after."""
+    problems = []
+    caption = item.body or item.title or ""
+    if profile.discord.enabled and len(caption) > DISCORD_CONTENT_LIMIT:
+        problems.append(
+            f"caption is {len(caption)} characters — Discord rejects anything over "
+            f"{DISCORD_CONTENT_LIMIT}, so it would fail"
+        )
+    if profile.discord.enabled and item.size_bytes > DISCORD_ATTACHMENT_LIMIT:
+        problems.append(
+            f"{format_size(item.size_bytes)} is over Discord's 10 MiB webhook limit — it "
+            "will post the text without the file"
+        )
+    if not profile.enabled_platforms:
+        problems.append("no platforms are enabled, so Post will not publish anywhere")
+    return problems
+
+
+async def send_preview(rt: Runtime, profile: Profile, item: Item) -> None:
+    """Show exactly what will go where, with Post / Edit / Cancel."""
+    await rt.bot.send_message(
+        chat_id=profile.telegram_chat_id,
+        text=preview_text(
+            filename=item.filename,
+            title=item.title or "",
+            body=item.body or "",
+            platforms=profile.enabled_platforms,
+            warnings=preview_warnings(profile, item),
+        ),
+        reply_markup=preview_keyboard(item.id),
+    )
 
 
 async def archive(rt: Runtime, item: Item, *, status: ItemStatus) -> str | None:

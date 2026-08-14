@@ -12,19 +12,22 @@ from telegram.ext import ContextTypes
 
 from app import db
 from app.config import Profile
-from app.intake import Runtime, archive, enqueue_telegram_media, local_path_for, offer
+from app.intake import (
+    Runtime,
+    archive,
+    enqueue_telegram_media,
+    local_path_for,
+    offer,
+    send_preview,
+)
 from app.models import ItemStatus, split_caption
 from app.platforms.base import PostStatus
-from app.platforms.discord import ATTACHMENT_LIMIT as DISCORD_ATTACHMENT_LIMIT
-from app.platforms.discord import CONTENT_LIMIT as DISCORD_CONTENT_LIMIT
 from app.publish import publish_item
 from app.telegram.cards import (
     CALLBACK_SEPARATOR,
     Action,
     close_card,
     format_size,
-    preview_keyboard,
-    preview_text,
     results_text,
     retry_keyboard,
 )
@@ -176,40 +179,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await db.set_caption(rt.conn, item.id, title, body)
     item.title, item.body = title, body
     log.info("item %d: caption set (%d chars)", item.id, len(message.text or ""))
-    await _send_preview(rt, profile, item, chat.id)
-
-
-async def _send_preview(rt: Runtime, profile: Profile, item, chat_id: int) -> None:
-    await rt.bot.send_message(
-        chat_id=chat_id,
-        text=preview_text(
-            filename=item.filename,
-            title=item.title or "",
-            body=item.body or "",
-            platforms=profile.enabled_platforms,
-            warnings=_warnings(profile, item),
-        ),
-        reply_markup=preview_keyboard(item.id),
-    )
-
-
-def _warnings(profile: Profile, item) -> list[str]:
-    """Everything worth knowing *before* tapping Post rather than after."""
-    problems = []
-    caption = item.body or item.title or ""
-    if profile.discord.enabled and len(caption) > DISCORD_CONTENT_LIMIT:
-        problems.append(
-            f"caption is {len(caption)} characters — Discord rejects anything over "
-            f"{DISCORD_CONTENT_LIMIT}, so it would fail"
-        )
-    if profile.discord.enabled and item.size_bytes > DISCORD_ATTACHMENT_LIMIT:
-        problems.append(
-            f"{format_size(item.size_bytes)} is over Discord's 10 MiB webhook limit — it "
-            "will post the text without the file"
-        )
-    if not profile.enabled_platforms:
-        problems.append("no platforms are enabled, so Post will not publish anywhere")
-    return problems
+    await send_preview(rt, profile, item)
 
 
 # -- buttons ----------------------------------------------------------------------------

@@ -31,8 +31,8 @@ Drive inbox/ ──▶ queue ──▶ Telegram: ✅ Approve / ❌ Decline / ⏭
 | 1 | Telegram core — allow-listed chat, approval buttons | **done** |
 | 2 | Drive queue + SQLite state | **done** |
 | 3 | Discord publishing — caption, preview, post, retry | **done** |
-| 4 | Reddit publishing — native video, link passthrough | next |
-| 5 | Hardening — restart reconciliation, Docker | |
+| 4 | Reddit publishing — native video, link passthrough | built, awaiting credentials |
+| 5 | Hardening — restart reconciliation, Docker | **done** |
 
 X is **not** in the roadmap — see [X (deferred)](#x-deferred).
 
@@ -94,6 +94,25 @@ Only one item per profile can be between Approve and Post at a time. Approving a
 one says so rather than accepting it, because otherwise a reply carrying the post text
 would be ambiguous about which item it belonged to.
 
+### Restarts
+
+State lives in SQLite, not in memory, so a reboot, a crash or a Docker restart loses
+nothing. On boot the service reconciles:
+
+- An item waiting for approval is offered again — the old card still works, but after an
+  outage it has usually scrolled away.
+- An item mid-conversation gets its text prompt or preview re-issued, so you are never
+  left talking to a bot that forgot the thread.
+- Local media that went missing is re-downloaded from Drive. If the item came from
+  Telegram there is nothing to re-fetch, so it says so and asks you to send it again.
+- **An item that was mid-post is reported, never retried automatically.** Platforms with a
+  recorded result are named as confirmed; platforms without one are genuinely unknown, and
+  the message says to check the channel before tapping Retry. Auto-retrying an unknown is
+  how something gets posted twice.
+
+Taps made while the service was down are honoured rather than discarded: every action
+checks the item's current status first, so a replayed tap answers "already handled".
+
 Offers are capped at `max_offers_per_cycle` (default 5) per poll, because Telegram
 rate-limits bulk sends to one chat. Dropping 40 files into the inbox trickles them out
 over cycles rather than getting throttled.
@@ -115,10 +134,23 @@ value and it makes no network calls, so it is safe to run at any point.
 
 Exit codes: `0` complete · `1` valid but credentials missing · `2` config invalid.
 
+## Running it in Docker
+
+The engine is a daemon — it has to stay running to poll Drive. The same
+`docker compose up -d` works everywhere; the only per-platform difference is the
+double-clickable wrapper:
+
+| | Start | Stop | Logs | Validate config |
+| --- | --- | --- | --- | --- |
+| **Windows** | `windows\start.bat` | `stop.bat` | `logs.bat` | `check-config.bat` |
+| **macOS** | `macos/start.command` | `stop.command` | `logs.command` | `check-config.command` |
+
+On macOS the first double-click may be refused by Gatekeeper — right-click → **Open**, or
+run `chmod +x macos/*.command` once.
+
 ## Running it on Windows with Docker Desktop
 
-The engine is a daemon — it has to stay running to poll Drive. These steps need no
-terminal; the `.bat` files are double-clickable.
+These steps need no terminal; the `.bat` files are double-clickable.
 
 **1. Install Docker Desktop** from [docker.com](https://www.docker.com/products/docker-desktop/)
 and launch it. Wait until the bottom-left says **Engine running**. In its Settings, tick
@@ -295,9 +327,31 @@ No bot invite or OAuth is involved; a webhook posts on its own. Uploads are capp
 10 MiB unless the server is boosted, so larger video posts the caption and link instead and
 is reported as ⚠️ rather than ✅.
 
-### Reddit script app — Phase 4
+### Reddit script app — needed for Phase 4
 
-Step-by-step guides land here as each phase is built.
+1. Go to [reddit.com/prefs/apps](https://www.reddit.com/prefs/apps), signed in as the
+   account that should own the posts.
+2. **create another app...** → name it → choose **script** (not "web app": script is the
+   only type that authenticates as your own account with a username and password).
+3. redirect uri: `http://localhost:8080` — nothing listens there, but the field is required.
+4. **Tick the reCAPTCHA**, then **create app**.
+5. The **client id** is the short string directly under the app name — it is not labelled.
+   The **secret** is on the line marked `secret`.
+6. Put the id, secret, and the account's username and password into `.env` under the four
+   variable names the profile's `*_env` keys point at.
+
+Then set `reddit.subreddit`, and `nsfw: true` if the target sub is NSFW — unflagged posts
+there get removed. If the sub requires post flair, set `flair_text` (or `flair_id`);
+without it Reddit rejects the submission and the error comes back on the result card.
+
+**If the page will not create the app:** a browser being driven by an automation or
+"AI operator" extension usually fails the reCAPTCHA silently. Close that extension, or use
+a clean browser profile, and try again. Reddit also gates new API apps behind its
+Responsible Builder Policy, so a very new or low-karma account may need to request access.
+
+**Not** to be confused with `developers.reddit.com` / Devvit, which is Reddit's platform
+for apps that run *inside* Reddit. That is a different product and cannot be called from
+an external service.
 
 ## Platform reality
 
@@ -405,6 +459,7 @@ app/
   drive.py           Google Drive v3 via a service account (list/download/move)
   intake.py          getting media into the queue and archiving it out again
   poller.py          the Drive poll loop
+  reconcile.py       on boot, resume whatever was in flight
   logging_setup.py   logging + secret redaction
   publish.py         fan an approved item out to every platform, concurrently
   telegram/
@@ -414,6 +469,7 @@ app/
   platforms/
     base.py          the publisher interface: item + caption in, result out
     discord.py       webhook publishing
+    reddit.py        asyncpraw: image, native video, or link post
 assets/test.png      approval card used by /test
 scripts/
   scan-secrets.sh    refuses to commit anything that looks like a credential
